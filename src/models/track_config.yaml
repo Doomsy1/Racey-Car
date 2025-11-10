@@ -1,0 +1,33 @@
+# Track Configuration for Racey-Car Simulator
+
+track:
+    inner_radius: 2.5
+    outer_radius: 3.25
+    num_segments: 100
+    line_radius: 0.0125
+    line_height: 0.0025
+
+camera:
+    resolution:
+        width: 960
+        height: 720
+    fov: 90
+    near_plane: 0.025
+    far_plane: 25.0
+    position_offset:
+        x: 0.125
+        y: 0.0
+        z: 0.15
+    pitch: -20
+
+physics:
+    time_step: 0.03333333333333333
+    gravity: -9.81
+    car:
+        max_wheel_velocity: 30.0
+        wheel_max_force: 0.20
+        in_place_turn_velocity: 24.0
+
+spawn:
+    position: [0.0, 2.75, 0.125]
+    orientation: [0, 0, 0, 1]
