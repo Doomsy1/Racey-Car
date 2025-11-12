@@ -17,6 +17,7 @@ python main.py
 ## Controls
 
 -   **Arrow Keys**: Tank drive (↑↓ forward/backward, ←→ rotate)
+-   **S**: Toggle bird's‑eye view
 -   **Q**: Quit
 
 ## Architecture

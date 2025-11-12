@@ -16,7 +16,12 @@ camera:
         x: 0.125
         y: 0.0
         z: 0.15
-    pitch: -20
+    pitch: -50
+    bird_eye_transform:
+        # Inverse perspective mapping parameters
+        # Pixels per meter in bird's-eye view
+        pixels_per_meter: 100.0        # Scale for bird's-eye output
+
 
 physics:
     time_step: 0.03333333333333333
