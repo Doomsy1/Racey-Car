@@ -1,12 +1,3 @@
-"""
-Track generation module for Racey-Car simulator.
-
-CRITICAL: Uses PyBullet GEOM_CYLINDER bodies (not debug lines) to enable
-segmentation mask-based line extraction. Each cylinder has a unique body ID
-that appears in the segmentation mask.
-"""
-
-from typing import List, Tuple
 import os
 
 import numpy as np
@@ -23,7 +14,7 @@ class Track:
     a thin cylinder positioned and oriented between consecutive points.
     """
 
-    def __init__(self, config_path: str) -> None:
+    def __init__(self, config_path):
         """
         Initialize track with configuration.
 
@@ -44,7 +35,6 @@ class Track:
         self.line_radius = config['track']['line_radius']
         self.line_height = config['track']['line_height']
 
-        # Storage for PyBullet body IDs (needed for segmentation masks)
         self.inner_track_ids = []
         self.outer_track_ids = []
 
@@ -69,13 +59,9 @@ class Track:
 
         return np.column_stack([x, y, z])
 
-    def spawn_in_pybullet(self, physics_client: int) -> None:
+    def spawn_in_pybullet(self, physics_client):
         """
         Create track cylinders in PyBullet simulation.
-
-        This is the CRITICAL method for segmentation-based line extraction.
-        Each cylinder gets a unique body ID that will appear in the camera's
-        segmentation mask.
 
         Args:
             physics_client: PyBullet physics client ID
@@ -204,12 +190,9 @@ class Track:
 
         return quaternion
 
-    def get_track_ids(self) -> Tuple[List[int], List[int]]:
+    def get_track_ids(self):
         """
         Get PyBullet body IDs for track cylinders.
-
-        CRITICAL: These IDs are needed by RaceCamera to filter the segmentation
-        mask and extract only track pixels.
 
         Returns:
             Tuple of (inner_track_ids, outer_track_ids) where each is a list of ints

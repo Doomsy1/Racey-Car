@@ -1,11 +1,7 @@
 """
-RaceCamera module for segmentation mask-based track line extraction.
-
-CRITICAL: This camera uses PyBullet's segmentation masks (NOT color filtering)
-to extract track lines. It requires track body IDs from the Track object.
+Module for segmentation mask-based track line extraction.
 """
 
-from typing import List, Tuple
 import os
 
 import numpy as np
@@ -14,14 +10,8 @@ import yaml
 
 
 class RaceCamera:
-    """
-    Camera that extracts track lines using PyBullet segmentation masks.
 
-    The camera is positioned relative to the car and uses segmentation mask
-    filtering to identify track pixels based on their PyBullet body IDs.
-    """
-
-    def __init__(self, config_path: str, track_ids: Tuple[List[int], List[int]], physics_client: int) -> None:
+    def __init__(self, config_path, track_ids, physics_client):
         """
         Initialize camera with track IDs for segmentation filtering.
 
@@ -55,7 +45,6 @@ class RaceCamera:
 
         self.physics_client = physics_client
 
-        # CRITICAL: Store track body IDs as a set for fast lookup
         inner_ids, outer_ids = track_ids
         self.track_ids_set = set(inner_ids + outer_ids)
 
@@ -67,12 +56,9 @@ class RaceCamera:
             farVal=self.far
         )
 
-    def capture_frame(self, car_id: int) -> np.ndarray:
+    def capture_frame(self, car_id):
         """
         Capture camera frame with track lines extracted via segmentation mask.
-
-        CRITICAL: This uses p.getCameraImage() with ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX
-        flag to get pixel-wise body IDs, then filters for track IDs.
 
         Args:
             car_id: PyBullet body ID of the car
@@ -121,7 +107,7 @@ class RaceCamera:
         object_ids = seg_raw & ((1 << 24) - 1)
 
         # Filter segmentation mask to extract track pixels (objectUniqueId match)
-        track_mask = np.isin(object_ids, self.track_ids_set)
+        track_mask = np.isin(object_ids, list(self.track_ids_set))
 
         # Create output image: white background (255), black track lines (0)
         output_image = np.ones((self.height, self.width), dtype=np.uint8) * 255
