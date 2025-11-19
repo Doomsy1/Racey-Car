@@ -4,6 +4,18 @@ track:
     num_segments: 100
     line_radius: 0.0125
     line_height: 0.0025
+    seed: 1
+    radius_jitter: 1.6
+    num_features: 9
+    straight_feature_ratio: 0.45
+    feature_width_range: [0.25, 0.6]
+    angle_warp_strength: 0.35
+    angle_warp_harmonics: 3
+    high_freq_scale: 0.3
+    num_chicanes: 3
+    chicane_spacing: [0.08, 0.16]
+    oval_ratio: 1.4
+    oval_rotation: 0.0
 
 camera:
     resolution:
