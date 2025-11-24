@@ -53,4 +53,4 @@ def visualize_all_contours(image_path, threshold_val=200, min_area=0):
 
 
 if __name__ == "__main__":
-    visualize_all_contours("sample_image4.png", threshold_val=200, min_area=10000)
+    visualize_all_contours("sample_images/sample_image2.png", threshold_val=200, min_area=500)

@@ -199,7 +199,7 @@ def extract_track_borders(image_path, num_points=500, poly_degree=4, visualize=T
 
 
 if __name__ == "__main__":
-    result = extract_track_borders("sample_images/sample_image.png", num_points=500, poly_degree=4)
+    result = extract_track_borders("sample_images/sample_image2.png", num_points=500, poly_degree=4)
     
     # if result is not None:
     #     np.savez('track_data.npz',
