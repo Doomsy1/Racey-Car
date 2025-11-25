@@ -47,8 +47,18 @@ class RaceCamera:
             farVal=self.far
         )
 
-    def capture_frame(self, car_id):
-        """Return a binary image where track objects are black on white."""
+    def capture_frame(self, car_id, overlay_centerline=False, centerline_points=None):
+        """
+        Return a binary image where track objects are black on white.
+        
+        Args:
+            car_id: Car body ID
+            overlay_centerline: If True, overlay centerline visualization
+            centerline_points: List of (x, y) tuples for centerline visualization
+            
+        Returns:
+            Binary image (grayscale) or RGB image if overlay enabled
+        """
         # Car pose
         car_pos, car_orn = p.getBasePositionAndOrientation(
             car_id,
@@ -88,6 +98,24 @@ class RaceCamera:
         output_image = np.ones((self.height, self.width), dtype=np.uint8) * 255
         output_image[track_mask] = 0
 
+        # Overlay centerline if requested
+        if overlay_centerline and centerline_points:
+            # Convert to RGB for color overlay
+            output_rgb = np.stack([output_image, output_image, output_image], axis=2)
+            
+            # Draw centerline points in green
+            for x, y in centerline_points:
+                if 0 <= x < self.width and 0 <= y < self.height:
+                    # Draw a small circle/point
+                    for dy in range(-2, 3):
+                        for dx in range(-2, 3):
+                            px, py = x + dx, y + dy
+                            if 0 <= px < self.width and 0 <= py < self.height:
+                                if dx*dx + dy*dy <= 4:  # Circle radius
+                                    output_rgb[py, px] = [0, 255, 0]  # Green
+            
+            return output_rgb
+        
         return output_image
 
     def _compute_view_matrix(self, car_pos, car_orn):

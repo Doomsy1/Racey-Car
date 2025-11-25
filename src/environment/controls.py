@@ -27,10 +27,18 @@ class TankDriveController:
 
         # Get fixed height from spawn position
         self.fixed_height = config['spawn']['position'][2]
+        
+        # Smoothing for manual control (exponential moving average)
+        self.current_angular_velocity = 0.0
+        self.current_linear_velocity = 0.0
+        self.angular_smoothing_factor = 0.3  # Lower = smoother but slower response
+        self.linear_smoothing_factor = 0.5    # Faster response for linear
 
     def update(self, keys):
         """Update car velocity from keyboard state."""
         keys = keys or {}
+        
+        # Use keyboard input with smoothing
         up_pressed = p.B3G_UP_ARROW in keys and (keys[p.B3G_UP_ARROW] & p.KEY_IS_DOWN)
         down_pressed = p.B3G_DOWN_ARROW in keys and (keys[p.B3G_DOWN_ARROW] & p.KEY_IS_DOWN)
         left_pressed = p.B3G_LEFT_ARROW in keys and (keys[p.B3G_LEFT_ARROW] & p.KEY_IS_DOWN)
@@ -40,9 +48,22 @@ class TankDriveController:
         forward_input = (1.0 if up_pressed else 0.0) + (-1.0 if down_pressed else 0.0)
         turn_input = (1.0 if left_pressed else 0.0) + (-1.0 if right_pressed else 0.0)
 
-        # Scale to actual velocities
-        linear_velocity = forward_input * self.max_linear_velocity
-        angular_velocity = turn_input * self.max_angular_velocity
+        # Target velocities
+        target_linear_velocity = forward_input * self.max_linear_velocity
+        target_angular_velocity = turn_input * self.max_angular_velocity
+        
+        # Apply exponential smoothing for smoother transitions
+        self.current_linear_velocity = (
+            self.linear_smoothing_factor * target_linear_velocity +
+            (1.0 - self.linear_smoothing_factor) * self.current_linear_velocity
+        )
+        self.current_angular_velocity = (
+            self.angular_smoothing_factor * target_angular_velocity +
+            (1.0 - self.angular_smoothing_factor) * self.current_angular_velocity
+        )
+        
+        linear_velocity = self.current_linear_velocity
+        angular_velocity = self.current_angular_velocity
 
         car_pos, car_orn = p.getBasePositionAndOrientation(
             self.car_id,

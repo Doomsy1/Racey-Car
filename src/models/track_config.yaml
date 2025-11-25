@@ -37,11 +37,44 @@ camera:
 
 physics:
     time_step: 0.03333333333333333
-    gravity: 0.0  # Disabled for simplified physics
+    gravity: -9.81  # Enable gravity for realistic physics
     car:
         max_linear_velocity: 2.0   # m/s forward/backward
-        max_angular_velocity: 2.0  # rad/s yaw rotation
+        max_angular_velocity: 3.5  # rad/s yaw rotation (increased for faster, smoother turning)
 
 spawn:
     position: [0.0, 2.75, 0.0675]
     orientation: [0, 0, 0, 1]
+
+# Random friction obstacles (COMMENTED OUT - using track-wide surface instead)
+# friction_obstacles:
+#     enabled: true
+#     count: 60  # Increased count for better coverage
+#     size_range: [0.25, 0.35]  # Size in meters [min, max]
+#     height: 0.01  # Height of obstacle (thin patches)
+#     placement: aligned  # Options: aligned, random, centerline, sides
+
+# Track-wide friction surface that fills the entire track area
+track_friction_surface:
+    enabled: true
+    friction_coefficient: 0.8  # Friction coefficient (0.0 = ice, 1.0 = high friction)
+    height: 0.001  # Thickness of the surface in meters (very thin to avoid catching car)
+    color: [0.3, 0.3, 0.3, 1.0]  # Gray color (RGBA)
+
+hill_obstacles:
+    enabled: true
+    count: 6
+    type: mound  # Options: ramp, bump, mound
+    size_range: [0.5, 1.5]  # Size in meters [min, max]
+    height_range: [0.15, 0.25]  # Height in meters [min, max]
+    color: [0.5, 0.4, 0.3, 1.0]  # Brown/tan color (RGBA)
+    placement: random  # Options: random, centerline, sides
+
+autonomous:
+    enabled: false  # Set to true to start in auto mode
+    target_speed: 1.5  # Constant speed in m/s
+    steering_pid:
+        kp: 0.01  # Proportional gain
+        ki: 0.0   # Integral gain
+        kd: 0.005 # Derivative gain
+    centerline_row: 0.6  # Fraction of image height to sample centerline (0.0-1.0)

@@ -1,14 +1,13 @@
 import pybullet as p
 import pybullet_data
-import cv2
 import yaml
 import os
 import time
+import numpy as np
 
 from environment.track import Track
-from environment.camera import RaceCamera
 from environment.controls import TankDriveController
-from environment.transforms import BirdEyeTransform
+from environment.friction_obstacles import spawn_friction_obstacles, spawn_track_friction_surface
 
 
 class RaceSimulator:
@@ -46,31 +45,76 @@ class RaceSimulator:
         self.track = Track(self.config_path)
         self.track.spawn_in_pybullet(self.physics_client)
 
-        track_ids = self.track.get_track_ids()
-        self.camera = RaceCamera(self.config_path, track_ids, self.physics_client)
+        # # Spawn friction pads with different colors (COMMENTED OUT)
+        # self.friction_obstacle_ids = []
+        # friction_obstacles_config = self.config.get('friction_obstacles', {})
+        # if friction_obstacles_config.get('enabled', False):
+        #     self.friction_obstacle_ids = spawn_friction_obstacles(
+        #         self.track,
+        #         self.physics_client,
+        #         self.car_id,
+        #         friction_obstacles_config
+        #     )
+        #     print(f"Spawned {len(self.friction_obstacle_ids)} friction pads with different colors")
+
+        # Spawn track-wide friction surface
+        self.track_friction_surface_ids = []
+        track_friction_config = self.config.get('track_friction_surface', {})
+        if track_friction_config.get('enabled', False):
+            self.track_friction_surface_ids = spawn_track_friction_surface(
+                self.track,
+                self.physics_client,
+                self.car_id,
+                track_friction_config
+            )
+            friction_coeff = track_friction_config.get('friction_coefficient', 3)
+            print(f"Spawned track-wide friction surface with {len(self.track_friction_surface_ids)} segments (friction: {friction_coeff})")
 
         self.controller = TankDriveController(self.config_path, self.car_id, self.physics_client)
 
-        self.bird_eye_transform = BirdEyeTransform(self.config_path)
-
         self.running = True
+        self.bird_eye_view = False  # Toggle for bird's-eye camera
 
-        self.bird_eye_view = False
-
-        # Non-realtime stepping and reduced GUI clutter
+        # Non-realtime stepping
         p.setRealTimeSimulation(0, physicsClientId=self.physics_client)
+        
+        # Enable GUI for free camera movement (camera starts in normal/free mode)
         try:
-            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=self.physics_client)
-        except Exception:
-            pass
-
-        try:
-            cv2.namedWindow('Race Camera', cv2.WINDOW_NORMAL)
+            p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1, physicsClientId=self.physics_client)
+            # Camera starts in normal/free mode - user can scroll/rotate with mouse
+            # Press 'S' to toggle to bird's-eye view
         except Exception:
             pass
         
-        print("Simulation ready. Arrow keys: drive | S: toggle view | Q: quit")
+        print("Simulation ready. Arrow keys: drive | S: toggle bird's-eye view | Q: quit")
+        print("Use mouse to scroll/rotate camera in PyBullet window")
 
+
+    def _update_camera_view(self):
+        """Update camera to bird's-eye view above car."""
+        car_pos, car_orn = p.getBasePositionAndOrientation(
+            self.car_id,
+            physicsClientId=self.physics_client
+        )
+        
+        # Bird's-eye view: camera above car looking down
+        camera_height = 5.0  # Height above car
+        camera_pos = [car_pos[0], car_pos[1], car_pos[2] + camera_height]
+        target_pos = [car_pos[0], car_pos[1], car_pos[2]]
+        
+        view_matrix = p.computeViewMatrix(
+            cameraEyePosition=camera_pos,
+            cameraTargetPosition=target_pos,
+            cameraUpVector=[0, 1, 0]
+        )
+        
+        p.resetDebugVisualizerCamera(
+            cameraDistance=camera_height,
+            cameraYaw=0,
+            cameraPitch=-90,  # Look straight down
+            cameraTargetPosition=car_pos,
+            physicsClientId=self.physics_client
+        )
 
     def run(self):
         while self.running:
@@ -79,35 +123,25 @@ class RaceSimulator:
                 if ord('q') in keys and keys[ord('q')] & p.KEY_WAS_TRIGGERED:
                     self.running = False
                     break
+                elif ord('s') in keys and keys[ord('s')] & p.KEY_WAS_TRIGGERED:
+                    self.bird_eye_view = not self.bird_eye_view
+                    if self.bird_eye_view:
+                        self._update_camera_view()
+                        print("Switched to bird's-eye view (press S again to free camera)")
+                    else:
+                        print("Switched to free camera mode (use mouse to scroll/rotate)")
 
+            # Update controller with keyboard input
             self.controller.update(keys if keys else {})
+
+            # Update bird's-eye camera to follow car if enabled
+            if self.bird_eye_view:
+                self._update_camera_view()
 
             p.stepSimulation(physicsClientId=self.physics_client)
 
-            frame = self.camera.capture_frame(self.car_id)
-
-            if self.bird_eye_view:
-                frame = self.bird_eye_transform.apply(frame)
-
-            try:
-                cv2.imshow('Race Camera', frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key in (ord('q'), ord('Q')):
-                    self.running = False
-                    break
-                elif key in (ord('s'), ord('S')):
-                    self.bird_eye_view = not self.bird_eye_view
-                    view_mode = "bird's-eye" if self.bird_eye_view else "camera"
-                    print(f"Switched to {view_mode} view")
-            except Exception:
-                pass
-
             time.sleep(self.config['physics']['time_step'])
 
-        try:
-            cv2.destroyAllWindows()
-        except Exception:
-            pass
         p.disconnect(physicsClientId=self.physics_client)
 
 
