@@ -5,6 +5,8 @@ import yaml
 import os
 import time
 
+from vision_pipeline import run
+
 from environment.track import Track
 from environment.camera import RaceCamera
 from environment.controls import TankDriveController
@@ -89,8 +91,11 @@ class RaceSimulator:
             if self.bird_eye_view:
                 frame = self.bird_eye_transform.apply(frame)
 
+            # Capture and display camera frame
             try:
+                frame = run.main(use_webcam=False, frame=frame)
                 cv2.imshow('Race Camera', frame)
+                # Check for quit key from OpenCV window
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord('q'), ord('Q')):
                     self.running = False

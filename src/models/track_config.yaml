@@ -9,14 +9,14 @@ camera:
     resolution:
         width: 960
         height: 720
-    fov: 90
+    fov: 120
     near_plane: 0.025
     far_plane: 25.0
     position_offset:
         x: 0.125
         y: 0.0
         z: 0.15
-    pitch: -50
+    pitch: -70
     bird_eye_transform:
         # Inverse perspective mapping parameters
         # Pixels per meter in bird's-eye view
