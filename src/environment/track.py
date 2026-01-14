@@ -70,6 +70,10 @@ class Track:
         self._rng = np.random.default_rng(self.seed)
 
         centerline = self._generate_centerline_points()
+        self.centerline_points = centerline
+        self.centerline_tangents = self._compute_tangents(centerline[:, :2])
+        self.centerline_arc_lengths = self._compute_arc_lengths(centerline[:, :2])
+        self.total_length = self._compute_total_length(centerline[:, :2])
         self.inner_points = self._offset_curve(centerline, -self.half_width)
         self.outer_points = self._offset_curve(centerline, self.half_width)
 
@@ -309,6 +313,29 @@ class Track:
                 tangents[i] = vec / norm
         return tangents
 
+    def _compute_arc_lengths(self, points_xy):
+        """Cumulative arc lengths of a closed polyline."""
+        pts = np.asarray(points_xy, dtype=float)
+        n = len(pts)
+        arc = [0.0]
+        total = 0.0
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            seg_len = float(np.linalg.norm(p1 - p0))
+            total += seg_len
+            arc.append(total)
+        return np.array(arc[:-1], dtype=float)
+
+    def _compute_total_length(self, points_xy):
+        pts = np.asarray(points_xy, dtype=float)
+        total = 0.0
+        for i in range(len(pts)):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % len(pts)]
+            total += float(np.linalg.norm(p1 - p0))
+        return total
+
     def spawn_in_pybullet(self, physics_client):
         """Create cylinders in the physics world."""
         self.inner_track_ids = self._create_track_cylinders(
@@ -400,3 +427,68 @@ class Track:
     def get_track_ids(self):
         """Return (inner_ids, outer_ids) for spawned cylinders."""
         return (self.inner_track_ids, self.outer_track_ids)
+
+    def get_centerline_points(self):
+        """Return cached centerline points."""
+        return self.centerline_points
+
+    def get_centerline_tangents(self):
+        """Return cached tangents along the centerline."""
+        return self.centerline_tangents
+
+    def get_centerline_arc_lengths(self):
+        """Return cached cumulative arc lengths for the centerline."""
+        return self.centerline_arc_lengths
+
+    def project_onto_centerline(self, point_xy):
+        """
+        Project a 2D point to the closest point on the discrete centerline.
+
+        Returns:
+            s: arc-length position along the loop (meters)
+            lateral_error: signed lateral offset from centerline (meters, left-positive)
+            tangent: unit vector along the centerline at the projection
+        """
+        pts = self.centerline_points[:, :2]
+        n = len(pts)
+        best_dist_sq = float("inf")
+        best_s = 0.0
+        best_lateral = 0.0
+        best_tangent = np.array([1.0, 0.0], dtype=float)
+
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            seg = p1 - p0
+            seg_len_sq = np.dot(seg, seg)
+            if seg_len_sq < 1e-12:
+                continue
+            t = np.clip(np.dot(point_xy - p0, seg) / seg_len_sq, 0.0, 1.0)
+            proj = p0 + t * seg
+            diff = point_xy - proj
+            dist_sq = np.dot(diff, diff)
+            if dist_sq < best_dist_sq:
+                best_dist_sq = dist_sq
+                s0 = self.centerline_arc_lengths[i]
+                seg_len = np.sqrt(seg_len_sq)
+                best_s = s0 + t * seg_len
+                normal = np.array([-seg[1], seg[0]])
+                normal_norm = np.linalg.norm(normal) or 1.0
+                best_lateral = np.dot(diff, normal / normal_norm)
+                seg_norm = seg_len or 1.0
+                best_tangent = seg / seg_norm
+
+        return float(best_s % self.total_length), float(best_lateral), best_tangent
+
+    def get_spawn_pose(self, index=0, height=None):
+        """Return a position/quaternion aligned with the centerline."""
+        if self.centerline_points is None or self.centerline_tangents is None:
+            raise RuntimeError("Centerline data not initialized.")
+        idx = index % len(self.centerline_points)
+        pos = np.array(self.centerline_points[idx], dtype=float)
+        if height is not None:
+            pos[2] = height
+        tangent = self.centerline_tangents[idx]
+        yaw = np.arctan2(tangent[1], tangent[0])
+        quat = p.getQuaternionFromEuler([0.0, 0.0, float(yaw)])
+        return pos, quat
