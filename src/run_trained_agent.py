@@ -25,6 +25,7 @@ def build_eval_env(
                 observation_scale=obs_scale,
                 max_episode_duration=max_episode_duration,
                 terminate_off_track=terminate_off_track,
+                cache_track=True,
             )
         ]
     )

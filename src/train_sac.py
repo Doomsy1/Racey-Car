@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Callable, List, Optional
 
 import torch
+import torch.nn as nn
+import yaml
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
@@ -19,6 +21,8 @@ def build_env_fn(
     gui: bool = False,
     obs_scale: float = 0.25,
     throttle_bias: float = 0.0,
+    track_seed: int | None = None,
+    cache_track: bool = False,
 ) -> Callable[[], RaceCarEnv]:
     """Factory for (Monitor-wrapped) RaceCarEnv instances."""
 
@@ -28,25 +32,48 @@ def build_env_fn(
             gui=gui,
             observation_scale=obs_scale,
             throttle_bias=throttle_bias,
+            cache_track=cache_track,
+            track_seed=track_seed,
         )
         return Monitor(env)
 
     return _init
 
 
+def load_track_seed(config_path: str) -> int | None:
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except OSError:
+        return None
+    track_cfg = config.get("track", {})
+    seed = track_cfg.get("seed")
+    if seed is None:
+        return None
+    try:
+        return int(seed)
+    except (TypeError, ValueError):
+        return None
+
+
 def make_vector_env(
     config_path: str, num_envs: int, obs_scale: float, throttle_bias: float
 ) -> VecEnv:
     """Create either a dummy or subprocess vectorized env, depending on n."""
-    env_fns: List[Callable[[], RaceCarEnv]] = [
-        build_env_fn(
-            config_path=config_path,
-            gui=False,
-            obs_scale=obs_scale,
-            throttle_bias=throttle_bias,
+    base_seed = load_track_seed(config_path)
+    env_fns: List[Callable[[], RaceCarEnv]] = []
+    for idx in range(num_envs):
+        track_seed = (base_seed + idx) if base_seed is not None else idx
+        env_fns.append(
+            build_env_fn(
+                config_path=config_path,
+                gui=False,
+                obs_scale=obs_scale,
+                throttle_bias=throttle_bias,
+                track_seed=track_seed,
+                cache_track=True,
+            )
         )
-        for _ in range(num_envs)
-    ]
     if num_envs <= 1:
         vec_env = DummyVecEnv(env_fns)
     else:
@@ -88,6 +115,13 @@ def save_readable_model(model: SAC, save_dir: str, metadata: dict) -> None:
     metadata["saved_utc"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(os.path.join(save_dir, "metadata.json"), "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True)
+
+
+def apply_he_init(module: nn.Module) -> None:
+    if isinstance(module, nn.Linear):
+        nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
 
 
 class ReadableCheckpointCallback(BaseCallback):
@@ -411,7 +445,12 @@ def main() -> None:
         gradient_steps=args.gradient_steps,
         batch_size=args.batch_size,
         device=device,
+        policy_kwargs={
+            "optimizer_class": torch.optim.AdamW,
+            "optimizer_kwargs": {"weight_decay": 1e-4},
+        },
     )
+    model.policy.apply(apply_he_init)
 
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks)
 

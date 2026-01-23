@@ -32,6 +32,8 @@ class RaceCarEnv(gym.Env):
         allow_reverse: bool = False,
         throttle_bias: float = 0.0,
         capture_camera: bool = False,
+        cache_track: bool = False,
+        track_seed: Optional[int] = None,
     ):
         super().__init__()
         self.gui = gui
@@ -71,15 +73,6 @@ class RaceCarEnv(gym.Env):
             self.config["spawn"].get("centerline_index", 0)
         )
 
-        # Track helper
-        self.track = Track(self.config_path)
-        self.inner_polygon = self.track.inner_points[:, :2]
-        self.outer_polygon = self.track.outer_points[:, :2]
-        self.track_width = self.track.outer_radius - self.track.inner_radius
-        self._force_centerline_spawn()
-        self._ensure_valid_spawn_pose()
-        self.track_length = float(self.track.total_length)
-
         self.max_episode_duration = max_episode_duration
         self.max_episode_steps = (
             int(np.ceil(max_episode_duration / self.time_step))
@@ -97,6 +90,17 @@ class RaceCarEnv(gym.Env):
         self.allow_reverse = bool(allow_reverse)
         self.throttle_bias = float(throttle_bias)
         self.capture_camera = bool(capture_camera)
+        self.cache_track = bool(cache_track)
+        self.track_seed = track_seed
+
+        # Track helper
+        self.track = Track(self.config_path, seed=self.track_seed)
+        self.inner_polygon = self.track.inner_points[:, :2]
+        self.outer_polygon = self.track.outer_points[:, :2]
+        self.track_width = self.track.outer_radius - self.track.inner_radius
+        self._force_centerline_spawn()
+        self._ensure_valid_spawn_pose()
+        self.track_length = float(self.track.total_length)
 
         # Camera config (still used for rendering; observations are handcrafted features)
         camera_cfg = self.config["camera"]
@@ -124,6 +128,7 @@ class RaceCarEnv(gym.Env):
         self.camera: Optional[RaceCamera] = None
         self.start_line_id: Optional[int] = None
         self.latest_frame: Optional[np.ndarray] = None
+        self._track_spawned = False
         self.wheel_link_names = [
             "front_left_wheel",
             "front_right_wheel",
@@ -201,15 +206,10 @@ class RaceCarEnv(gym.Env):
         off_track_boundary = self.track_width * 0.5 + off_track_margin
         off_track = abs(lateral_error) > off_track_boundary
         if off_track:
-            # Penalize distance beyond the boundary to encourage returning.
-            excess_dist = abs(lateral_error) - off_track_boundary
-            scaled_excess = max(0.0, excess_dist) * self.off_track_distance_scale
-            capped_excess = min(scaled_excess, 50.0)
-            distance_penalty = capped_excess * np.log1p(capped_excess)
-            reward -= distance_penalty
+            # End the episode and zero reward to avoid filling replay with off-track steps.
+            reward = 0.0
             info["event"] = "off_track"
-            if self.terminate_off_track:
-                terminated = True
+            terminated = True
         else:
             self.prev_progress_s = progress_s
 
@@ -276,17 +276,24 @@ class RaceCarEnv(gym.Env):
 
     def _reset_simulation_world(self) -> None:
         assert self.physics_client is not None
-        p.resetSimulation(physicsClientId=self.physics_client)
-        p.setGravity(0, 0, self.gravity, physicsClientId=self.physics_client)
-        p.setTimeStep(self.time_step, physicsClientId=self.physics_client)
+        if not self.cache_track or not self._track_spawned:
+            p.resetSimulation(physicsClientId=self.physics_client)
+            p.setGravity(0, 0, self.gravity, physicsClientId=self.physics_client)
+            p.setTimeStep(self.time_step, physicsClientId=self.physics_client)
 
-        p.loadURDF("plane.urdf")
-        self.track.spawn_in_pybullet(self.physics_client)
-        track_ids = self.track.get_track_ids()
-        self.camera = RaceCamera(self.config_path, track_ids, self.physics_client)
+            p.loadURDF("plane.urdf")
+            self.track.spawn_in_pybullet(self.physics_client)
+            track_ids = self.track.get_track_ids()
+            self.camera = RaceCamera(self.config_path, track_ids, self.physics_client)
 
-        self._spawn_car()
-        self._spawn_start_line_marker()
+            self._spawn_car()
+            self._spawn_start_line_marker()
+            self._track_spawned = True
+        else:
+            if self.car_id is None:
+                self._spawn_car()
+            else:
+                self._reset_car_pose()
 
         self.lap_started = False
         self.lap_time = 0.0
@@ -296,6 +303,7 @@ class RaceCarEnv(gym.Env):
         self.prev_start_line_value = -0.1
         self.last_position_xy = self.spawn_position[:2].copy()
         self.current_linear_velocity = 0.0
+        self.latest_frame = None
 
     def _spawn_car(self) -> None:
         assert self.physics_client is not None
@@ -312,6 +320,16 @@ class RaceCarEnv(gym.Env):
             physicsClientId=self.physics_client,
         )
         self._cache_wheel_links()
+        self._reset_car_pose()
+
+    def _reset_car_pose(self) -> None:
+        assert self.car_id is not None and self.physics_client is not None
+        p.resetBasePositionAndOrientation(
+            self.car_id,
+            self.spawn_position.tolist(),
+            self.spawn_orientation,
+            physicsClientId=self.physics_client,
+        )
         p.resetBaseVelocity(
             self.car_id,
             [0.0, 0.0, 0.0],
