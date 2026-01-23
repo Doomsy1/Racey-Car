@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Callable, List, Optional
 
 import torch
-from stable_baselines3 import PPO
+from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
@@ -38,14 +38,17 @@ def make_vector_env(config_path: str, num_envs: int, obs_scale: float, throttle_
 
 def build_metadata(args: argparse.Namespace, run_name: str, num_envs: int, device: str) -> dict:
     return {
-        "algorithm": "PPO",
+        "algorithm": "SAC",
         "policy": "MlpPolicy",
         "config_path": args.config,
         "obs_scale": args.obs_scale,
         "num_envs": num_envs,
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
-        "n_steps": args.n_steps,
+        "buffer_size": args.buffer_size,
+        "learning_starts": args.learning_starts,
+        "train_freq": args.train_freq,
+        "gradient_steps": args.gradient_steps,
         "total_timesteps": args.total_timesteps,
         "run_name": run_name,
         "device": device,
@@ -53,7 +56,7 @@ def build_metadata(args: argparse.Namespace, run_name: str, num_envs: int, devic
     }
 
 
-def save_readable_model(model: PPO, save_dir: str, metadata: dict) -> None:
+def save_readable_model(model: SAC, save_dir: str, metadata: dict) -> None:
     os.makedirs(save_dir, exist_ok=True)
     policy_state = {key: value.detach().cpu() for key, value in model.policy.state_dict().items()}
     torch.save(policy_state, os.path.join(save_dir, "policy_state.pt"))
@@ -198,7 +201,7 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train PPO on the Racey-Car simulator.")
+    parser = argparse.ArgumentParser(description="Train SAC on the Racey-Car simulator.")
     default_config = os.path.join(os.path.dirname(__file__), "models", "track_config.yaml")
     parser.add_argument(
         "--config",
@@ -258,37 +261,31 @@ def parse_args() -> argparse.Namespace:
         "--buffer-size",
         type=int,
         default=200_000,
-        help="Unused in PPO (kept for compatibility).",
+        help="Replay buffer size for SAC.",
     )
     parser.add_argument(
         "--learning-starts",
         type=int,
         default=10_000,
-        help="Unused in PPO (kept for compatibility).",
+        help="Number of steps before learning starts.",
     )
     parser.add_argument(
         "--train-freq",
         type=int,
         default=1,
-        help="Unused in PPO (kept for compatibility).",
+        help="How often (in steps) to train the policy.",
     )
     parser.add_argument(
         "--gradient-steps",
         type=int,
         default=1,
-        help="Unused in PPO (kept for compatibility).",
+        help="Gradient steps to run after each rollout step.",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=128,
-        help="Mini-batch size for PPO updates.",
-    )
-    parser.add_argument(
-        "--n-steps",
-        type=int,
-        default=1024,
-        help="Rollout horizon per environment before each PPO update.",
+        help="Mini-batch size for SAC updates.",
     )
     parser.add_argument(
         "--throttle-bias",
@@ -326,7 +323,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    run_name = args.run_name or datetime.utcnow().strftime("ppo_racey_%Y%m%d_%H%M%S")
+    run_name = args.run_name or datetime.utcnow().strftime("sac_racey_%Y%m%d_%H%M%S")
     checkpoint_dir = os.path.join(args.checkpoint_dir, run_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -342,28 +339,41 @@ def main() -> None:
     checkpoint_callback = ReadableCheckpointCallback(
         save_freq=max(1, args.checkpoint_frequency // env.num_envs),
         save_path=checkpoint_dir,
-        name_prefix="ppo_racey",
+        name_prefix="sac_racey",
         base_metadata=base_metadata,
     )
     progress_callback = ProgressBarCallback(args.total_timesteps)
     diagnostics_callback = DiagnosticsCallback()
-    callbacks: CallbackList = CallbackList([checkpoint_callback, progress_callback, diagnostics_callback])
+    bias_anneal_steps = max(1, int(args.total_timesteps * args.throttle_bias_anneal_frac))
+    ent_anneal_steps = max(1, int(args.total_timesteps * args.ent_anneal_frac))
+    bias_entropy_callback = BiasAndEntropyAnnealCallback(
+        bias_start=args.throttle_bias,
+        bias_anneal_steps=bias_anneal_steps,
+        ent_start_mult=args.ent_start_mult,
+        ent_anneal_steps=ent_anneal_steps,
+    )
+    callbacks: CallbackList = CallbackList(
+        [checkpoint_callback, progress_callback, diagnostics_callback, bias_entropy_callback]
+    )
 
-    model = PPO(
+    model = SAC(
         "MlpPolicy",
         env,
         verbose=1,
         learning_rate=args.learning_rate,
         tensorboard_log=os.path.join(args.tensorboard_log, run_name),
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        train_freq=args.train_freq,
+        gradient_steps=args.gradient_steps,
         batch_size=args.batch_size,
-        n_steps=args.n_steps,
         device=device,
     )
 
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks)
 
     env.close()
-    final_model_path = os.path.join(checkpoint_dir, "ppo_racey_final")
+    final_model_path = os.path.join(checkpoint_dir, "sac_racey_final")
     final_metadata = dict(base_metadata)
     final_metadata["checkpoint_timesteps"] = int(model.num_timesteps)
     final_metadata["final"] = True

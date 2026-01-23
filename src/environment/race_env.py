@@ -13,7 +13,7 @@ from environment.track import Track
 
 
 class RaceCarEnv(gym.Env):
-    """Gymnasium environment that exposes the race car camera feed as observations."""
+    """Gymnasium environment with handcrafted state features and optional camera render."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
@@ -22,20 +22,13 @@ class RaceCarEnv(gym.Env):
         config_path: Optional[str] = None,
         gui: bool = False,
         max_episode_duration: Optional[float] = 120.0,
-        off_track_penalty: float = -1.2,
         min_lap_time: float = 5.0,
         min_lap_distance: float = 4.0,
         min_lap_progress_ratio: float = 0.95,
         observation_scale: float = 0.25,
-        off_track_grace_steps: int = 30,
         terminate_off_track: bool = False,
-        reward_progress_scale: float = 0.0,
-        reward_speed_scale: float = 50.0,
-        reward_heading_scale: float = 5.0,
-        lateral_penalty_scale: float = 2.0,
-        reward_time_penalty_scale: float = 0.1,
-        reward_idle_penalty: float = 2.0,
-        min_moving_speed: float = 0.5,
+        reward_speed_scale: float = 100.0,
+        off_track_distance_scale: float = 5.0,
         allow_reverse: bool = False,
         throttle_bias: float = 0.0,
     ):
@@ -92,22 +85,15 @@ class RaceCarEnv(gym.Env):
             if max_episode_duration is not None
             else None
         )
-        self.off_track_penalty = off_track_penalty
         self.min_lap_time = min_lap_time
         self.min_lap_distance = min_lap_distance
         if not (0.0 < min_lap_progress_ratio <= 1.0):
             raise ValueError("min_lap_progress_ratio must be in the range (0, 1].")
         self.min_lap_progress_ratio = float(min_lap_progress_ratio)
-        self.off_track_grace_steps = max(0, int(off_track_grace_steps))
         self.terminate_off_track = bool(terminate_off_track)
-        self.progress_reward_scale = float(reward_progress_scale)
         self.speed_reward_scale = float(reward_speed_scale)
-        self.lateral_penalty_scale = float(lateral_penalty_scale)
-        self.time_penalty_scale = float(reward_time_penalty_scale)
-        self.idle_penalty_scale = float(reward_idle_penalty)
-        self.min_moving_speed = float(min_moving_speed)
+        self.off_track_distance_scale = float(off_track_distance_scale)
         self.allow_reverse = bool(allow_reverse)
-        self.heading_reward_scale = float(reward_heading_scale)
         self.throttle_bias = float(throttle_bias)
 
         # Camera config (still used for rendering; observations are handcrafted features)
@@ -119,7 +105,7 @@ class RaceCarEnv(gym.Env):
         self.obs_height = max(
             1, int(round(self.camera_height * self.observation_scale))
         )
-        # Feature vector: [speed_norm, lateral_error_norm, heading_align, progress_frac, yaw_rate_norm]
+        # Feature vector: [speed_norm, lateral_error_norm, heading_align, on_track, yaw_rate_norm]
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -137,6 +123,14 @@ class RaceCarEnv(gym.Env):
         self.camera: Optional[RaceCamera] = None
         self.start_line_id: Optional[int] = None
         self.latest_frame: Optional[np.ndarray] = None
+        self.wheel_link_names = [
+            "front_left_wheel",
+            "front_right_wheel",
+            "rear_left_wheel",
+            "rear_right_wheel",
+        ]
+        # Populated after loading the URDF.
+        self.wheel_link_indices: list[int] = []
 
         self.lap_started = False
         self.lap_time = 0.0
@@ -148,7 +142,6 @@ class RaceCarEnv(gym.Env):
         self.start_line_point = self.spawn_position[:2].copy()
         self.last_position_xy = self.spawn_position[:2].copy()
         self.np_random = np.random.default_rng()
-        self.grace_counter = self.off_track_grace_steps
         self.current_linear_velocity = 0.0
         self.prev_progress_s = 0.0
 
@@ -184,8 +177,7 @@ class RaceCarEnv(gym.Env):
                 self.action_space.high[0],
             )
 
-        prev_speed = self.current_linear_velocity
-        throttle = self._apply_action(action)
+        self._apply_action(action)
         p.stepSimulation(physicsClientId=self.physics_client)
         self.elapsed_steps += 1
 
@@ -200,14 +192,18 @@ class RaceCarEnv(gym.Env):
         info: Dict[str, Any] = {"event": "running", "lap_time": self.lap_time}
         reward = 0.0
         info["speed"] = abs(self.current_linear_velocity)
-        # reward -= self.time_step * self.time_penalty_scale
 
         progress_s, lateral_error, tangent_vec = self._track_progress(car_xy)
         prog_delta = self._progress_delta(progress_s, self.prev_progress_s)
+        # Track boundary check (use margin to avoid flicker at the edges).
         off_track_margin = max(0.05, self.track_width * 0.1)
-        off_track = abs(lateral_error) > (self.track_width * 0.5 + off_track_margin)
-        if self.grace_counter <= 0 and off_track:
-            reward += self.off_track_penalty
+        off_track_boundary = self.track_width * 0.5 + off_track_margin
+        off_track = abs(lateral_error) > off_track_boundary
+        if off_track:
+            # Penalize distance beyond the boundary to encourage returning.
+            excess_dist = abs(lateral_error) - off_track_boundary
+            distance_penalty = np.expm1(max(0.0, excess_dist) * self.off_track_distance_scale)
+            reward -= distance_penalty
             info["event"] = "off_track"
             if self.terminate_off_track:
                 terminated = True
@@ -220,16 +216,14 @@ class RaceCarEnv(gym.Env):
                 step_distance = np.linalg.norm(car_xy - self.last_position_xy)
                 self.distance_travelled += step_distance
 
-            # Speed incentive (squared to emphasize higher speeds)
+            # Speed incentive: scale by alignment to avoid rewarding speed when misaligned.
             speed_ratio = abs(self.current_linear_velocity) / max(
                 self.max_linear_velocity, 1e-6
             )
-            reward += (speed_ratio**2) * self.speed_reward_scale
-            accel = (self.current_linear_velocity - prev_speed) / max(
-                self.time_step, 1e-6
-            )
-            accel_norm = accel / max(self.max_longitudinal_accel, 1e-6)
-            reward += accel_norm * self.speed_reward_scale * 0.25
+            alignment = self._heading_alignment_reward(tangent_vec)
+            alignment_weight = 0.5 * (alignment + 1.0)
+            scaled_speed = np.tanh(speed_ratio) * self.speed_reward_scale
+            reward += (np.exp(scaled_speed) - 1.0) * alignment_weight
 
             if lap_complete:
                 terminated = True
@@ -237,10 +231,6 @@ class RaceCarEnv(gym.Env):
                 info["lap_time"] = self.lap_time
 
         self.last_position_xy = car_xy
-        # if abs(self.current_linear_velocity) < self.min_moving_speed:
-        #     reward -= self.idle_penalty_scale * self.time_step
-        if self.grace_counter > 0:
-            self.grace_counter -= 1
 
         if (
             not terminated
@@ -293,7 +283,6 @@ class RaceCarEnv(gym.Env):
         self.elapsed_steps = 0
         self.prev_start_line_value = -0.1
         self.last_position_xy = self.spawn_position[:2].copy()
-        self.grace_counter = self.off_track_grace_steps
         self.current_linear_velocity = 0.0
 
     def _spawn_car(self) -> None:
@@ -310,6 +299,7 @@ class RaceCarEnv(gym.Env):
             baseOrientation=self.spawn_orientation,
             physicsClientId=self.physics_client,
         )
+        self._cache_wheel_links()
         p.resetBaseVelocity(
             self.car_id,
             [0.0, 0.0, 0.0],
@@ -446,11 +436,12 @@ class RaceCarEnv(gym.Env):
         heading_align = self._heading_alignment_reward(
             tangent_vec
         )  # already normalized dot
-        progress_frac = progress_s / max(self.track_length, 1e-6)
+        # On-track flag: 1 if any wheel is on the track surface.
+        on_track = 1.0 if self._any_wheel_on_track() else 0.0
         yaw_rate_norm = float(ang_vel[2]) / max(self.max_angular_velocity, 1e-6)
 
         features = np.array(
-            [speed_norm, lateral_norm, heading_align, progress_frac, yaw_rate_norm],
+            [speed_norm, lateral_norm, heading_align, on_track, yaw_rate_norm],
             dtype=np.float32,
         )
         return features
@@ -515,6 +506,46 @@ class RaceCarEnv(gym.Env):
                 return True
         return False
 
+    def _cache_wheel_links(self) -> None:
+        assert self.car_id is not None and self.physics_client is not None
+        # Map URDF link names to joint indices for fast wheel position lookups.
+        name_to_index: dict[str, int] = {}
+        for joint_idx in range(
+            p.getNumJoints(self.car_id, physicsClientId=self.physics_client)
+        ):
+            info = p.getJointInfo(
+                self.car_id, joint_idx, physicsClientId=self.physics_client
+            )
+            link_name = info[12].decode("utf-8")
+            if link_name in self.wheel_link_names:
+                name_to_index[link_name] = joint_idx
+        self.wheel_link_indices = [
+            name_to_index[name]
+            for name in self.wheel_link_names
+            if name in name_to_index
+        ]
+
+    def _any_wheel_on_track(self) -> bool:
+        assert self.car_id is not None and self.physics_client is not None
+        if not self.wheel_link_indices:
+            # Fallback to body position if wheel links are unavailable.
+            car_pos, _ = p.getBasePositionAndOrientation(
+                self.car_id, physicsClientId=self.physics_client
+            )
+            return self._is_within_track(np.array(car_pos[:2], dtype=float))
+
+        for link_idx in self.wheel_link_indices:
+            link_state = p.getLinkState(
+                self.car_id,
+                link_idx,
+                computeForwardKinematics=True,
+                physicsClientId=self.physics_client,
+            )
+            link_pos = link_state[0]
+            if self._is_within_track(np.array(link_pos[:2], dtype=float)):
+                return True
+        return False
+
     def _start_line_value(self, car_xy: np.ndarray) -> float:
         rel = car_xy - self.start_line_point
         return float(np.dot(rel, self.start_line_normal))
@@ -543,7 +574,7 @@ class RaceCarEnv(gym.Env):
         return delta
 
     def _heading_alignment_reward(self, tangent_vec: np.ndarray) -> float:
-        """Reward moving along the track; uses actual velocity direction, not just orientation."""
+        """Return cosine alignment between velocity direction and track tangent."""
         if self.car_id is None:
             return 0.0
         lin_vel, _ = p.getBaseVelocity(self.car_id, physicsClientId=self.physics_client)
@@ -554,7 +585,7 @@ class RaceCarEnv(gym.Env):
         vel_dir = vel_xy / speed
         tangent = tangent_vec / (np.linalg.norm(tangent_vec) + 1e-8)
         alignment = float(np.dot(vel_dir, tangent))
-        return alignment  # scaled by heading_reward_scale at call site
+        return alignment
 
     @staticmethod
     def _point_in_polygon(point: np.ndarray, polygon: np.ndarray) -> bool:
