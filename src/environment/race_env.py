@@ -27,10 +27,11 @@ class RaceCarEnv(gym.Env):
         min_lap_progress_ratio: float = 0.95,
         observation_scale: float = 0.25,
         terminate_off_track: bool = False,
-        reward_speed_scale: float = 100.0,
+        reward_speed_scale: float = 10.0,
         off_track_distance_scale: float = 5.0,
         allow_reverse: bool = False,
         throttle_bias: float = 0.0,
+        capture_camera: bool = False,
     ):
         super().__init__()
         self.gui = gui
@@ -95,6 +96,7 @@ class RaceCarEnv(gym.Env):
         self.off_track_distance_scale = float(off_track_distance_scale)
         self.allow_reverse = bool(allow_reverse)
         self.throttle_bias = float(throttle_bias)
+        self.capture_camera = bool(capture_camera)
 
         # Camera config (still used for rendering; observations are handcrafted features)
         camera_cfg = self.config["camera"]
@@ -107,9 +109,8 @@ class RaceCarEnv(gym.Env):
         )
         # Feature vector: [speed_norm, lateral_error_norm, heading_align, on_track, yaw_rate_norm]
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(5,),
+            low=np.array([0.0, -1.0, -1.0, 0.0, -1.0], dtype=np.float32),
+            high=np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float32),
             dtype=np.float32,
         )
         self.action_space = spaces.Box(
@@ -202,7 +203,9 @@ class RaceCarEnv(gym.Env):
         if off_track:
             # Penalize distance beyond the boundary to encourage returning.
             excess_dist = abs(lateral_error) - off_track_boundary
-            distance_penalty = np.expm1(max(0.0, excess_dist) * self.off_track_distance_scale)
+            scaled_excess = max(0.0, excess_dist) * self.off_track_distance_scale
+            capped_excess = min(scaled_excess, 50.0)
+            distance_penalty = capped_excess * np.log1p(capped_excess)
             reward -= distance_penalty
             info["event"] = "off_track"
             if self.terminate_off_track:
@@ -223,7 +226,9 @@ class RaceCarEnv(gym.Env):
             alignment = self._heading_alignment_reward(tangent_vec)
             alignment_weight = 0.5 * (alignment + 1.0)
             scaled_speed = np.tanh(speed_ratio) * self.speed_reward_scale
-            reward += (np.exp(scaled_speed) - 1.0) * alignment_weight
+            speed_term = max(0.0, scaled_speed)
+            # n log n growth to avoid exponential blow-ups.
+            reward += (speed_term * np.log1p(speed_term)) * alignment_weight
 
             if lap_complete:
                 terminated = True
@@ -240,9 +245,16 @@ class RaceCarEnv(gym.Env):
             truncated = True
             info["event"] = "timeout"
 
-        return observation, float(reward), terminated, truncated, info
+        reward = float(np.clip(reward, -1000.0, 1000.0))
+        return observation, reward, terminated, truncated, info
 
     def render(self) -> Optional[np.ndarray]:
+        if (
+            self.latest_frame is None
+            and self.camera is not None
+            and self.car_id is not None
+        ):
+            self.latest_frame = self.camera.capture_frame(self.car_id)
         return self.latest_frame
 
     def close(self) -> None:
@@ -415,9 +427,9 @@ class RaceCarEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         assert self.camera is not None and self.car_id is not None
-        # Capture for rendering only
-        frame = self.camera.capture_frame(self.car_id)
-        self.latest_frame = frame
+        # Capture only if explicitly requested for rendering.
+        if self.capture_camera:
+            self.latest_frame = self.camera.capture_frame(self.car_id)
 
         # Handcrafted feature vector for MLPPolicy (based on current pose/velocity)
         car_pos, car_orn = p.getBasePositionAndOrientation(
@@ -433,12 +445,15 @@ class RaceCarEnv(gym.Env):
         speed = float(np.linalg.norm(vel_xy))
         speed_norm = speed / max(self.max_linear_velocity, 1e-6)
         lateral_norm = lateral_error / max(self.track_width * 0.5, 1e-6)
-        heading_align = self._heading_alignment_reward(
-            tangent_vec
-        )  # already normalized dot
+        heading_align = self._heading_alignment_reward(tangent_vec)
         # On-track flag: 1 if any wheel is on the track surface.
         on_track = 1.0 if self._any_wheel_on_track() else 0.0
         yaw_rate_norm = float(ang_vel[2]) / max(self.max_angular_velocity, 1e-6)
+
+        speed_norm = float(np.clip(speed_norm, 0.0, 1.0))
+        lateral_norm = float(np.clip(lateral_norm, -1.0, 1.0))
+        heading_align = float(np.clip(heading_align, -1.0, 1.0))
+        yaw_rate_norm = float(np.clip(yaw_rate_norm, -1.0, 1.0))
 
         features = np.array(
             [speed_norm, lateral_norm, heading_align, on_track, yaw_rate_norm],

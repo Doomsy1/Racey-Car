@@ -14,20 +14,38 @@ from tqdm import tqdm
 from environment.race_env import RaceCarEnv
 
 
-def build_env_fn(config_path: str, gui: bool = False, obs_scale: float = 0.25, throttle_bias: float = 0.0) -> Callable[[], RaceCarEnv]:
+def build_env_fn(
+    config_path: str,
+    gui: bool = False,
+    obs_scale: float = 0.25,
+    throttle_bias: float = 0.0,
+) -> Callable[[], RaceCarEnv]:
     """Factory for (Monitor-wrapped) RaceCarEnv instances."""
 
     def _init() -> RaceCarEnv:
-        env = RaceCarEnv(config_path=config_path, gui=gui, observation_scale=obs_scale, throttle_bias=throttle_bias)
+        env = RaceCarEnv(
+            config_path=config_path,
+            gui=gui,
+            observation_scale=obs_scale,
+            throttle_bias=throttle_bias,
+        )
         return Monitor(env)
 
     return _init
 
 
-def make_vector_env(config_path: str, num_envs: int, obs_scale: float, throttle_bias: float) -> VecEnv:
+def make_vector_env(
+    config_path: str, num_envs: int, obs_scale: float, throttle_bias: float
+) -> VecEnv:
     """Create either a dummy or subprocess vectorized env, depending on n."""
     env_fns: List[Callable[[], RaceCarEnv]] = [
-        build_env_fn(config_path=config_path, gui=False, obs_scale=obs_scale, throttle_bias=throttle_bias) for _ in range(num_envs)
+        build_env_fn(
+            config_path=config_path,
+            gui=False,
+            obs_scale=obs_scale,
+            throttle_bias=throttle_bias,
+        )
+        for _ in range(num_envs)
     ]
     if num_envs <= 1:
         vec_env = DummyVecEnv(env_fns)
@@ -36,7 +54,9 @@ def make_vector_env(config_path: str, num_envs: int, obs_scale: float, throttle_
     return vec_env
 
 
-def build_metadata(args: argparse.Namespace, run_name: str, num_envs: int, device: str) -> dict:
+def build_metadata(
+    args: argparse.Namespace, run_name: str, num_envs: int, device: str
+) -> dict:
     return {
         "algorithm": "SAC",
         "policy": "MlpPolicy",
@@ -58,7 +78,9 @@ def build_metadata(args: argparse.Namespace, run_name: str, num_envs: int, devic
 
 def save_readable_model(model: SAC, save_dir: str, metadata: dict) -> None:
     os.makedirs(save_dir, exist_ok=True)
-    policy_state = {key: value.detach().cpu() for key, value in model.policy.state_dict().items()}
+    policy_state = {
+        key: value.detach().cpu() for key, value in model.policy.state_dict().items()
+    }
     torch.save(policy_state, os.path.join(save_dir, "policy_state.pt"))
     metadata = dict(metadata)
     metadata["observation_space"] = str(model.observation_space)
@@ -71,7 +93,9 @@ def save_readable_model(model: SAC, save_dir: str, metadata: dict) -> None:
 class ReadableCheckpointCallback(BaseCallback):
     """Checkpoint callback that writes policy weights + JSON metadata."""
 
-    def __init__(self, save_freq: int, save_path: str, name_prefix: str, base_metadata: dict):
+    def __init__(
+        self, save_freq: int, save_path: str, name_prefix: str, base_metadata: dict
+    ):
         super().__init__()
         self.save_freq = save_freq
         self.save_path = save_path
@@ -83,7 +107,9 @@ class ReadableCheckpointCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         if self.n_calls % self.save_freq == 0:
-            step_dir = os.path.join(self.save_path, f"{self.name_prefix}_step_{self.num_timesteps}")
+            step_dir = os.path.join(
+                self.save_path, f"{self.name_prefix}_step_{self.num_timesteps}"
+            )
             metadata = dict(self.base_metadata)
             metadata["checkpoint_timesteps"] = int(self.num_timesteps)
             save_readable_model(self.model, step_dir, metadata)
@@ -138,7 +164,11 @@ class DiagnosticsCallback(BaseCallback):
             self._reward_sum += float(rewards.mean())
             self._count += 1
         if infos:
-            speeds = [info.get("speed") for info in infos if isinstance(info, dict) and "speed" in info]
+            speeds = [
+                info.get("speed")
+                for info in infos
+                if isinstance(info, dict) and "speed" in info
+            ]
             if speeds:
                 self._speed_sum += float(sum(speeds) / len(speeds))
         if self.n_calls % self.log_freq == 0 and self._count:
@@ -193,7 +223,9 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
         if self.base_target_entropy is not None:
             ent_ratio = min(1.0, step / self.ent_anneal_steps)
             start_target = self.base_target_entropy * self.ent_start_mult
-            current_target = start_target + ent_ratio * (self.base_target_entropy - start_target)
+            current_target = start_target + ent_ratio * (
+                self.base_target_entropy - start_target
+            )
             self.model.target_entropy = current_target
             if self.logger is not None and self.n_calls % 200 == 0:
                 self.logger.record("diagnostics/target_entropy", current_target)
@@ -201,8 +233,12 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train SAC on the Racey-Car simulator.")
-    default_config = os.path.join(os.path.dirname(__file__), "models", "track_config.yaml")
+    parser = argparse.ArgumentParser(
+        description="Train SAC on the Racey-Car simulator."
+    )
+    default_config = os.path.join(
+        os.path.dirname(__file__), "models", "track_config.yaml"
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -218,7 +254,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=1e-3,
+        default=1e-2,
         help="Optimizer learning rate.",
     )
     parser.add_argument(
@@ -344,7 +380,9 @@ def main() -> None:
     )
     progress_callback = ProgressBarCallback(args.total_timesteps)
     diagnostics_callback = DiagnosticsCallback()
-    bias_anneal_steps = max(1, int(args.total_timesteps * args.throttle_bias_anneal_frac))
+    bias_anneal_steps = max(
+        1, int(args.total_timesteps * args.throttle_bias_anneal_frac)
+    )
     ent_anneal_steps = max(1, int(args.total_timesteps * args.ent_anneal_frac))
     bias_entropy_callback = BiasAndEntropyAnnealCallback(
         bias_start=args.throttle_bias,
@@ -353,7 +391,12 @@ def main() -> None:
         ent_anneal_steps=ent_anneal_steps,
     )
     callbacks: CallbackList = CallbackList(
-        [checkpoint_callback, progress_callback, diagnostics_callback, bias_entropy_callback]
+        [
+            checkpoint_callback,
+            progress_callback,
+            diagnostics_callback,
+            bias_entropy_callback,
+        ]
     )
 
     model = SAC(
