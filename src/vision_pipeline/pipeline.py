@@ -18,6 +18,7 @@ class FrameResult:
     success: bool
     roi: np.ndarray
     binary_mask: np.ndarray
+    track_region_mask: np.ndarray
     left_border: PointList
     right_border: PointList
     midline: PointList
@@ -39,9 +40,11 @@ class VisionPipeline:
 
     def process_frame(self, frame: np.ndarray) -> Dict[str, object]:
         """Full processing pipeline for a single BGR frame."""
+        frame_h, frame_w = frame.shape[:2]
         roi, roi_rect, roi_mask = self._extract_roi(frame)
         if roi.size == 0:
-            return self._format_result(False, roi, roi, [], [], [], roi_rect)
+            empty_mask = np.full((frame_h, frame_w), 255, dtype=np.uint8)
+            return self._format_result(False, roi, roi, empty_mask, [], [], [], roi_rect)
 
         gray = self._preprocess(roi)
         mask = self._segment_lanes(gray, roi_mask)
@@ -56,8 +59,21 @@ class VisionPipeline:
         left_border = self._roi_points_to_frame(left_roi, roi_rect)
         right_border = self._roi_points_to_frame(right_roi, roi_rect)
         midline = self._roi_points_to_frame(midline_roi, roi_rect)
+        track_region_mask_roi = self._build_track_region_mask(left_roi, right_roi, mask.shape)
+        track_region_mask = self._embed_roi_mask(
+            track_region_mask_roi, (frame_h, frame_w), roi_rect
+        )
 
-        return self._format_result(success, roi, mask, left_border, right_border, midline, roi_rect)
+        return self._format_result(
+            success,
+            roi,
+            mask,
+            track_region_mask,
+            left_border,
+            right_border,
+            midline,
+            roi_rect,
+        )
 
     def _extract_roi(self, frame: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int], np.ndarray]:
         h, w = frame.shape[:2]
@@ -203,6 +219,52 @@ class VisionPipeline:
         return self._smooth_points(midline)
 
     @staticmethod
+    def _build_track_region_mask(
+        left: PointList, right: PointList, roi_shape: Tuple[int, int]
+    ) -> np.ndarray:
+        """
+        Build a binary mask in ROI coordinates:
+        black (0) inside the corridor between borders, white (255) outside.
+        """
+        roi_h, roi_w = roi_shape
+        mask = np.full((roi_h, roi_w), 255, dtype=np.uint8)
+
+        polygon_points: list[tuple[int, int]] = []
+        for x, y in left:
+            if np.isfinite(x) and np.isfinite(y):
+                polygon_points.append(
+                    (int(np.clip(round(x), 0, roi_w - 1)), int(np.clip(round(y), 0, roi_h - 1)))
+                )
+
+        right_points: list[tuple[int, int]] = []
+        for x, y in right:
+            if np.isfinite(x) and np.isfinite(y):
+                right_points.append(
+                    (int(np.clip(round(x), 0, roi_w - 1)), int(np.clip(round(y), 0, roi_h - 1)))
+                )
+
+        if len(polygon_points) < 2 or len(right_points) < 2:
+            return mask
+
+        polygon_points.extend(reversed(right_points))
+        poly = np.asarray(polygon_points, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [poly], 0)
+        return mask
+
+    @staticmethod
+    def _embed_roi_mask(
+        roi_mask: np.ndarray, frame_shape: Tuple[int, int], roi_rect: Tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """Place an ROI-sized mask into a full-frame white canvas."""
+        frame_h, frame_w = frame_shape
+        full_mask = np.full((frame_h, frame_w), 255, dtype=np.uint8)
+        x, y, w, h = roi_rect
+        if w <= 0 or h <= 0:
+            return full_mask
+        full_mask[y : y + h, x : x + w] = roi_mask
+        return full_mask
+
+    @staticmethod
     def _roi_points_to_frame(points: PointList, roi_rect: Tuple[int, int, int, int]) -> PointList:
         x_off, y_off, _, _ = roi_rect
         return [(x + x_off, y + y_off) for x, y in points]
@@ -212,6 +274,7 @@ class VisionPipeline:
         success: bool,
         roi: np.ndarray,
         mask: np.ndarray,
+        track_region_mask: np.ndarray,
         left_border: PointList,
         right_border: PointList,
         midline: PointList,
@@ -221,6 +284,7 @@ class VisionPipeline:
             "success": success,
             "roi": roi,
             "binary_mask": mask,
+            "track_region_mask": track_region_mask,
             "left_border": left_border,
             "right_border": right_border,
             "midline": midline,

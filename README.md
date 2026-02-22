@@ -33,3 +33,4 @@ Edit `src/models/track_config.yaml` to adjust track geometry, camera parameters,
 -   Set `vision_pipeline.config.FRAME_WIDTH`/`FRAME_HEIGHT` to `None` when you want to use the camera's native resolution. The pipeline will automatically expand the ROI to the full frame when both values are unspecified.
 -   Adjust `vision_pipeline.config.ROI.force_full_frame` if you always want the full view, regardless of the configured resolution.
 -   Narrow black lines can be emphasized by tweaking `vision_pipeline.config.THIN_LINE` (post-threshold dilation) or lowering `vision_pipeline.config.SCANLINES.min_blob_width`. Morphological opening is disabled by default so thin tape is not eroded away.
+-   For a minimal usage guide and the black/white mask entrypoint, see `src/vision_pipeline/README.md`.

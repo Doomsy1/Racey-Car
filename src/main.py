@@ -58,6 +58,7 @@ class RaceSimulator:
         self.running = True
 
         self.bird_eye_view = False
+        self.vision_display_mode = "mask"
 
         # Non-realtime stepping and reduced GUI clutter
         p.setRealTimeSimulation(0, physicsClientId=self.physics_client)
@@ -71,7 +72,7 @@ class RaceSimulator:
         except Exception:
             pass
         
-        print("Simulation ready. Arrow keys: drive | S: toggle view | Q: quit")
+        print("Simulation ready. Arrow keys: drive | S: toggle view | V: toggle vision display | Q: quit")
 
 
     def run(self):
@@ -93,7 +94,11 @@ class RaceSimulator:
 
             # Capture and display camera frame
             try:
-                frame = run.main(use_webcam=False, frame=frame)
+                frame = run.main(
+                    use_webcam=False,
+                    frame=frame,
+                    output_mode=self.vision_display_mode,
+                )
                 cv2.imshow('Race Camera', frame)
                 # Check for quit key from OpenCV window
                 key = cv2.waitKey(1) & 0xFF
@@ -104,6 +109,11 @@ class RaceSimulator:
                     self.bird_eye_view = not self.bird_eye_view
                     view_mode = "bird's-eye" if self.bird_eye_view else "camera"
                     print(f"Switched to {view_mode} view")
+                elif key in (ord('v'), ord('V')):
+                    self.vision_display_mode = (
+                        "overlay" if self.vision_display_mode == "mask" else "mask"
+                    )
+                    print(f"Switched vision display to {self.vision_display_mode}")
             except Exception:
                 pass
 

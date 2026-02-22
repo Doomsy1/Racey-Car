@@ -43,7 +43,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main(use_webcam: bool = True, frame=None) -> Optional[np.ndarray]:
+def _draw_overlay(frame: np.ndarray, result: dict) -> np.ndarray:
+    visualize.draw_roi(frame, result["roi_rect"])
+    visualize.draw_polyline(frame, result["left_border"], visualize.COLOR_LEFT, thickness=3)
+    visualize.draw_polyline(frame, result["right_border"], visualize.COLOR_RIGHT, thickness=3)
+    visualize.draw_polyline(frame, result["midline"], visualize.COLOR_MID, thickness=3)
+    visualize.draw_text(
+        frame,
+        f"midline pts: {len(result['midline'])}",
+        result["success"],
+    )
+    return frame
+
+
+def main(use_webcam: bool = True, frame=None, output_mode: str = "mask") -> Optional[np.ndarray]:
     pipeline = _get_pipeline()
 
     if use_webcam:
@@ -62,19 +75,10 @@ def main(use_webcam: bool = True, frame=None) -> Optional[np.ndarray]:
                         continue
 
                     result = pipeline.process_frame(frame)
-                    visualize.draw_roi(frame, result["roi_rect"])
-                    visualize.draw_polyline(frame, result["left_border"], visualize.COLOR_LEFT, thickness=3)
-                    visualize.draw_polyline(frame, result["right_border"], visualize.COLOR_RIGHT, thickness=3)
-                    visualize.draw_polyline(frame, result["midline"], visualize.COLOR_MID, thickness=3)
-                    visualize.draw_text(
-                        frame,
-                        f"midline pts: {len(result['midline'])}",
-                        result["success"],
-                    )
-
+                    frame = _draw_overlay(frame, result)
                     cv2.imshow(config.MAIN_WINDOW_NAME, frame)
-                    if args.show_mask and result["binary_mask"] is not None:
-                        visualize.show_mask(result["binary_mask"])
+                    if args.show_mask and result["track_region_mask"] is not None:
+                        visualize.show_mask(result["track_region_mask"])
 
                     key = cv2.waitKey(1) & 0xFF
                     if key in (27, ord("q")):
@@ -88,19 +92,16 @@ def main(use_webcam: bool = True, frame=None) -> Optional[np.ndarray]:
 
         frame = _ensure_bgr(frame)
         result = pipeline.process_frame(frame)
-        visualize.draw_roi(frame, result["roi_rect"])
-        visualize.draw_polyline(frame, result["left_border"], visualize.COLOR_LEFT, thickness=3)
-        visualize.draw_polyline(frame, result["right_border"], visualize.COLOR_RIGHT, thickness=3)
-        visualize.draw_polyline(frame, result["midline"], visualize.COLOR_MID, thickness=3)
-        visualize.draw_text(
-            frame,
-            f"midline pts: {len(result['midline'])}",
-            result["success"],
-        )
-        if True and result["binary_mask"] is not None:
-            visualize.show_mask(result["binary_mask"])
 
-        return frame
+        if output_mode == "overlay":
+            return _draw_overlay(frame, result)
+
+        track_region_mask = result["track_region_mask"]
+        if track_region_mask is None:
+            return frame
+        if output_mode == "mask":
+            return cv2.cvtColor(track_region_mask, cv2.COLOR_GRAY2BGR)
+        raise ValueError(f"Unsupported output_mode: {output_mode}")
 
 
 
