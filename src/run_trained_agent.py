@@ -6,9 +6,19 @@ import time
 import numpy as np
 import torch
 from stable_baselines3 import PPO, SAC
-from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecEnv, VecFrameStack
 
 from environment.race_env import RaceCarEnv
+
+
+def _load_readable_metadata(model_path: str) -> dict | None:
+    if not os.path.isdir(model_path):
+        return None
+    metadata_path = os.path.join(model_path, "metadata.json")
+    if not os.path.exists(metadata_path):
+        return None
+    with open(metadata_path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
 def build_eval_env(
@@ -16,8 +26,9 @@ def build_eval_env(
     obs_scale: float,
     max_episode_duration: float | None,
     terminate_off_track: bool,
+    frame_stack: int,
 ) -> VecEnv:
-    return DummyVecEnv(
+    vec_env: VecEnv = DummyVecEnv(
         [
             lambda: RaceCarEnv(
                 config_path=config_path,
@@ -29,6 +40,9 @@ def build_eval_env(
             )
         ]
     )
+    if frame_stack > 1:
+        vec_env = VecFrameStack(vec_env, n_stack=frame_stack, channels_order="first")
+    return vec_env
 
 
 def load_model(model_path: str, env: VecEnv, device: str, algo: str) -> SAC | PPO:
@@ -42,7 +56,7 @@ def load_model(model_path: str, env: VecEnv, device: str, algo: str) -> SAC | PP
             )
         with open(metadata_path, "r", encoding="utf-8") as handle:
             metadata = json.load(handle)
-        policy_id = metadata.get("policy", "MlpPolicy")
+        policy_id = metadata.get("policy", "CnnPolicy")
         algo = metadata.get("algorithm", algo).lower()
         cls = PPO if algo == "ppo" else SAC
         model = cls(policy_id, env, device=device, verbose=0)
@@ -55,8 +69,10 @@ def load_model(model_path: str, env: VecEnv, device: str, algo: str) -> SAC | PP
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a trained PPO policy in the simulator GUI.")
-    default_config = os.path.join(os.path.dirname(__file__), "models", "track_config.yaml")
+    parser = argparse.ArgumentParser(description="Run a trained PPO/SAC policy in the simulator GUI.")
+    default_config = os.path.join(
+        os.path.dirname(__file__), "models", "track_config_eval_figure8.yaml"
+    )
     parser.add_argument(
         "--model",
         required=True,
@@ -73,7 +89,13 @@ def main() -> None:
         "--obs-scale",
         type=float,
         default=0.25,
-        help="Scale factor (0 < scale <= 1) applied to camera frames. Should match training.",
+        help="Scale factor (0 < scale <= 1) for the driver FOV occupancy map. Should match training.",
+    )
+    parser.add_argument(
+        "--frame-stack",
+        type=int,
+        default=4,
+        help="Number of consecutive observations stacked for temporal context.",
     )
     parser.add_argument(
         "--max-episode-duration",
@@ -94,7 +116,7 @@ def main() -> None:
     parser.add_argument(
         "--algo",
         type=str,
-        default="ppo",
+        default="sac",
         choices=["ppo", "sac"],
         help="Algorithm used to train the model.",
     )
@@ -103,11 +125,30 @@ def main() -> None:
     if not os.path.exists(args.model):
         raise FileNotFoundError(f"Model file not found: {args.model}")
 
+    metadata = _load_readable_metadata(args.model)
+    if metadata is not None and "obs_scale" in metadata:
+        trained_obs_scale = float(metadata["obs_scale"])
+        if abs(trained_obs_scale - float(args.obs_scale)) > 1e-9:
+            print(
+                "Overriding --obs-scale with trained value from metadata: "
+                f"{trained_obs_scale}"
+            )
+            args.obs_scale = trained_obs_scale
+    if metadata is not None and "frame_stack" in metadata:
+        trained_frame_stack = int(metadata["frame_stack"])
+        if trained_frame_stack != int(args.frame_stack):
+            print(
+                "Overriding --frame-stack with trained value from metadata: "
+                f"{trained_frame_stack}"
+            )
+            args.frame_stack = trained_frame_stack
+
     vec_env = build_eval_env(
         args.config,
         args.obs_scale,
         args.max_episode_duration,
         args.terminate_off_track,
+        args.frame_stack,
     )
     device = "mps" if torch.backends.mps.is_available() else "auto"
     model = load_model(args.model, vec_env, device, args.algo)

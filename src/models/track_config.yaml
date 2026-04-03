@@ -1,20 +1,52 @@
 track:
-    inner_radius: 2.5
-    outer_radius: 3.25
-    num_segments: 100
+    track_mode: random
+    inner_radius: 7.5
+    outer_radius: 9.0
+    num_segments: 160
     line_radius: 0.0125
     line_height: 0.0025
     seed: 1
-    radius_jitter: 1.6
-    num_features: 9
-    straight_feature_ratio: 0.45
-    feature_width_range: [0.25, 0.6]
-    angle_warp_strength: 0.35
-    angle_warp_harmonics: 3
-    high_freq_scale: 0.3
+    radius_jitter: 2.0
+    num_features: 12
+    straight_feature_ratio: 0.15
+    feature_width_range: [0.22, 0.55]
+    angle_warp_strength: 0.4
+    angle_warp_harmonics: 4
+    high_freq_scale: 0.2
     num_chicanes: 3
-    chicane_spacing: [0.08, 0.16]
-    oval_ratio: 1.4
+    chicane_spacing: [0.07, 0.14]
+    oval_ratio: 1.15
+    control_points: 20
+    theta_min: 0.12
+    theta_max: 0.45
+    affine_min: 0.75
+    affine_max: 1.25
+    affine_shear: 0.35
+    drift_amp_frac: 0.12
+    radial_mod_amp: 0.25
+    radial_mod_amp2: 0.15
+    curvature_min: 0.05
+    curvature_max: 2.0
+    curvature_margin: 0.2
+    curvature_relax: 3.0
+    curvature_tolerance: 0.15
+    curvature_noise_scale: 0.35
+    spline_samples_per_seg: 6
+    straight_count: 1
+    straight_min_frac: 0.02
+    straight_max_frac: 0.06
+    straight_epsilon: 0.08
+    corner_min_spacing_frac: 0.01
+    corner_kappa_diff: 0.0
+    hairpin_kappa: 0.8
+    hairpin_window_frac: 0.04
+    boundary_min_gap: 0.03
+    boundary_width_min_frac: 0.6
+    direction_change_max_deg: 200.0
+    direction_change_window_frac: 0.05
+    validate_overlap: false
+    enforce_corner_spacing: true
+    enforce_hairpin_sign: false
     oval_rotation: 0.0
 
 camera:
@@ -28,7 +60,7 @@ camera:
         x: 0.125
         y: 0.0
         z: 0.15
-    pitch: -50
+    pitch: -35
     bird_eye_transform:
         # Inverse perspective mapping parameters
         # Pixels per meter in bird's-eye view

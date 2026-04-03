@@ -10,10 +10,22 @@ import yaml
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv
+from stable_baselines3.common.vec_env import (
+    DummyVecEnv,
+    SubprocVecEnv,
+    VecEnv,
+    VecFrameStack,
+)
 from tqdm import tqdm
 
 from environment.race_env import RaceCarEnv
+
+
+def _parse_float_csv(value: str) -> list[float]:
+    parts = [item.strip() for item in str(value).split(",") if item.strip()]
+    if not parts:
+        raise ValueError("Expected a comma-separated list of floats.")
+    return [float(item) for item in parts]
 
 
 def build_env_fn(
@@ -23,6 +35,8 @@ def build_env_fn(
     throttle_bias: float = 0.0,
     track_seed: int | None = None,
     cache_track: bool = False,
+    random_spawn: bool = False,
+    terminate_off_track: bool = False,
 ) -> Callable[[], RaceCarEnv]:
     """Factory for (Monitor-wrapped) RaceCarEnv instances."""
 
@@ -34,6 +48,8 @@ def build_env_fn(
             throttle_bias=throttle_bias,
             cache_track=cache_track,
             track_seed=track_seed,
+            random_spawn=random_spawn,
+            terminate_off_track=terminate_off_track,
         )
         return Monitor(env)
 
@@ -57,7 +73,11 @@ def load_track_seed(config_path: str) -> int | None:
 
 
 def make_vector_env(
-    config_path: str, num_envs: int, obs_scale: float, throttle_bias: float
+    config_path: str,
+    num_envs: int,
+    obs_scale: float,
+    throttle_bias: float,
+    frame_stack: int = 1,
 ) -> VecEnv:
     """Create either a dummy or subprocess vectorized env, depending on n."""
     base_seed = load_track_seed(config_path)
@@ -72,12 +92,16 @@ def make_vector_env(
                 throttle_bias=throttle_bias,
                 track_seed=track_seed,
                 cache_track=True,
+                random_spawn=True,
+                terminate_off_track=False,  # non-terminal during training
             )
         )
     if num_envs <= 1:
         vec_env = DummyVecEnv(env_fns)
     else:
         vec_env = SubprocVecEnv(env_fns)
+    if frame_stack > 1:
+        vec_env = VecFrameStack(vec_env, n_stack=frame_stack, channels_order="first")
     return vec_env
 
 
@@ -86,9 +110,10 @@ def build_metadata(
 ) -> dict:
     return {
         "algorithm": "SAC",
-        "policy": "MlpPolicy",
+        "policy": "CnnPolicy",
         "config_path": args.config,
         "obs_scale": args.obs_scale,
+        "frame_stack": args.frame_stack,
         "num_envs": num_envs,
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
@@ -115,10 +140,15 @@ def save_readable_model(model: SAC, save_dir: str, metadata: dict) -> None:
     metadata["saved_utc"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(os.path.join(save_dir, "metadata.json"), "w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2, sort_keys=True)
+    # Save full model zip + replay buffer so inter-stage loading preserves
+    # optimizer state and experience (avoids cold-start warmup in each stage).
+    model.save(os.path.join(save_dir, "model"))
 
 
 def apply_he_init(module: nn.Module) -> None:
-    if isinstance(module, nn.Linear):
+    # Only apply to conv layers; actor/critic output Linear layers use tanh/identity
+    # and should keep SB3's default orthogonal initialisation.
+    if isinstance(module, nn.Conv2d):
         nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
         if module.bias is not None:
             nn.init.zeros_(module.bias)
@@ -161,7 +191,7 @@ class ProgressBarCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self.progress_bar = tqdm(total=self.total_timesteps, desc="Training", ncols=100)
-        self._last_num = 0
+        self._last_num = self.num_timesteps  # anchor to current offset (non-zero when reset_num_timesteps=False)
 
     def _on_step(self) -> bool:
         if self.progress_bar is None:
@@ -240,8 +270,29 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
         self.base_target_entropy: float | None = None
 
     def _on_training_start(self) -> None:
-        if hasattr(self.model, "target_entropy"):
-            self.base_target_entropy = float(self.model.target_entropy)
+        if not hasattr(self.model, "target_entropy"):
+            return
+        self.base_target_entropy = float(self.model.target_entropy)
+
+        if self.ent_start_mult <= 1.0:
+            return
+
+        # Reset log_ent_coef to match the exploratory start_target immediately,
+        # rather than waiting for the optimizer to slowly climb from the previous
+        # stage's converged (low) value.  We set log_alpha = log(|start_target|)
+        # as a reasonable warm-start: it makes alpha proportional to the target
+        # magnitude, which is a common SB3 initialisation heuristic.
+        import math
+        import torch
+
+        start_target = self.base_target_entropy / max(self.ent_start_mult, 1e-6)
+        init_log_ent = math.log(max(abs(start_target), 1e-8))
+        if hasattr(self.model, "log_ent_coef") and self.model.log_ent_coef is not None:
+            with torch.no_grad():
+                self.model.log_ent_coef.fill_(init_log_ent)
+            # Clear Adam momentum so old Stage-N gradients don't fight the reset.
+            if getattr(self.model, "ent_coef_optimizer", None) is not None:
+                self.model.ent_coef_optimizer.state.clear()
 
     def _on_step(self) -> bool:
         # Anneal bias
@@ -253,10 +304,13 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
         except Exception:
             pass
 
-        # Anneal entropy target
+        # Anneal entropy target: start less-negative (high entropy / exploratory),
+        # anneal toward the standard target (lower entropy / exploitative).
+        # Dividing base_target_entropy by ent_start_mult makes it less negative,
+        # which drives the entropy coefficient higher → more exploration early on.
         if self.base_target_entropy is not None:
             ent_ratio = min(1.0, step / self.ent_anneal_steps)
-            start_target = self.base_target_entropy * self.ent_start_mult
+            start_target = self.base_target_entropy / max(self.ent_start_mult, 1e-6)
             current_target = start_target + ent_ratio * (
                 self.base_target_entropy - start_target
             )
@@ -264,6 +318,133 @@ class BiasAndEntropyAnnealCallback(BaseCallback):
             if self.logger is not None and self.n_calls % 200 == 0:
                 self.logger.record("diagnostics/target_entropy", current_target)
         return True
+
+
+class RewardStagesCallback(BaseCallback):
+    """Apply staged reward-term weights during training."""
+
+    def __init__(
+        self,
+        total_timesteps: int,
+        stage_fracs: list[float],
+        progress_weights: list[float],
+        speed_weights: list[float],
+        steer_penalties: list[float],
+        gate_rewards: list[float],
+        off_track_penalties: list[float],
+    ):
+        super().__init__()
+        stage_count = len(stage_fracs)
+        if stage_count == 0:
+            raise ValueError("reward stages cannot be empty")
+        for values in (
+            progress_weights,
+            speed_weights,
+            steer_penalties,
+            gate_rewards,
+            off_track_penalties,
+        ):
+            if len(values) != stage_count:
+                raise ValueError("All stage-weight lists must match stage_fracs length.")
+        frac_sum = float(sum(stage_fracs))
+        if frac_sum <= 0.0:
+            raise ValueError("reward-stage-fracs must sum to a positive value.")
+        self.total_timesteps = max(1, int(total_timesteps))
+        self.stage_fracs = [float(max(0.0, frac)) / frac_sum for frac in stage_fracs]
+        self.progress_weights = [float(v) for v in progress_weights]
+        self.speed_weights = [float(v) for v in speed_weights]
+        self.steer_penalties = [float(v) for v in steer_penalties]
+        self.gate_rewards = [float(v) for v in gate_rewards]
+        self.off_track_penalties = [float(v) for v in off_track_penalties]
+        self.stage_starts = self._build_stage_starts()
+        self.current_stage = -1
+
+    def _build_stage_starts(self) -> list[int]:
+        starts: list[int] = [0]
+        cumulative = 0.0
+        for idx, frac in enumerate(self.stage_fracs[:-1]):
+            cumulative += frac
+            step = int(round(cumulative * self.total_timesteps))
+            starts.append(min(max(step, starts[idx]), self.total_timesteps))
+        return starts
+
+    def _stage_for_timestep(self, step: int) -> int:
+        stage = 0
+        for idx, start in enumerate(self.stage_starts):
+            if step >= start:
+                stage = idx
+            else:
+                break
+        return stage
+
+    def _apply_stage(self, stage_idx: int) -> None:
+        self.training_env.set_attr(
+            "reward_progress_weight", self.progress_weights[stage_idx]
+        )
+        self.training_env.set_attr("reward_speed_weight", self.speed_weights[stage_idx])
+        self.training_env.set_attr("steer_rate_penalty", self.steer_penalties[stage_idx])
+        self.training_env.set_attr("gate_reward", self.gate_rewards[stage_idx])
+        self.training_env.set_attr(
+            "off_track_penalty", self.off_track_penalties[stage_idx]
+        )
+        print(
+            "[reward-stage] "
+            f"stage={stage_idx + 1}/{len(self.stage_fracs)} "
+            f"start_step={self.stage_starts[stage_idx]} "
+            f"progress_w={self.progress_weights[stage_idx]:.3f} "
+            f"speed_w={self.speed_weights[stage_idx]:.3f} "
+            f"steer_pen={self.steer_penalties[stage_idx]:.4f} "
+            f"gate_reward={self.gate_rewards[stage_idx]:.3f} "
+            f"off_track_pen={self.off_track_penalties[stage_idx]:.3f}"
+        )
+        if self.logger is not None:
+            self.logger.record("curriculum/reward_stage", float(stage_idx + 1))
+            self.logger.record(
+                "curriculum/reward_progress_weight", self.progress_weights[stage_idx]
+            )
+            self.logger.record(
+                "curriculum/reward_speed_weight", self.speed_weights[stage_idx]
+            )
+            self.logger.record(
+                "curriculum/steer_rate_penalty", self.steer_penalties[stage_idx]
+            )
+            self.logger.record("curriculum/gate_reward", self.gate_rewards[stage_idx])
+            self.logger.record(
+                "curriculum/off_track_penalty", self.off_track_penalties[stage_idx]
+            )
+
+    def _on_training_start(self) -> None:
+        self.current_stage = self._stage_for_timestep(self.num_timesteps)
+        self._apply_stage(self.current_stage)
+
+    def _on_step(self) -> bool:
+        stage = self._stage_for_timestep(self.num_timesteps)
+        if stage != self.current_stage:
+            self.current_stage = stage
+            self._apply_stage(stage)
+        return True
+
+
+def build_reward_stages_callback(
+    args: argparse.Namespace,
+) -> RewardStagesCallback | None:
+    if args.disable_reward_stages:
+        return None
+    stage_fracs = _parse_float_csv(args.reward_stage_fracs)
+    progress_weights = _parse_float_csv(args.stage_progress_weights)
+    speed_weights = _parse_float_csv(args.stage_speed_weights)
+    steer_penalties = _parse_float_csv(args.stage_steer_penalties)
+    gate_rewards = _parse_float_csv(args.stage_gate_rewards)
+    off_track_penalties = _parse_float_csv(args.stage_off_track_penalties)
+    return RewardStagesCallback(
+        total_timesteps=args.total_timesteps,
+        stage_fracs=stage_fracs,
+        progress_weights=progress_weights,
+        speed_weights=speed_weights,
+        steer_penalties=steer_penalties,
+        gate_rewards=gate_rewards,
+        off_track_penalties=off_track_penalties,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -325,7 +506,13 @@ def parse_args() -> argparse.Namespace:
         "--obs-scale",
         type=float,
         default=0.25,
-        help="Scale factor (0 < scale <= 1) applied to camera frames before exposing them as observations.",
+        help="Scale factor (0 < scale <= 1) controlling driver FOV occupancy map resolution.",
+    )
+    parser.add_argument(
+        "--frame-stack",
+        type=int,
+        default=4,
+        help="Number of consecutive observations stacked for temporal context.",
     )
     parser.add_argument(
         "--buffer-size",
@@ -336,7 +523,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--learning-starts",
         type=int,
-        default=10_000,
+        default=25_000,
         help="Number of steps before learning starts.",
     )
     parser.add_argument(
@@ -372,13 +559,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ent-start-mult",
         type=float,
-        default=3.0,
+        default=4.0,
         help="Multiplier for initial target entropy (higher = more exploration early).",
     )
     parser.add_argument(
         "--ent-anneal-frac",
         type=float,
-        default=0.8,
+        default=0.9,
         help="Fraction of total timesteps over which target entropy is annealed back to default.",
     )
     parser.add_argument(
@@ -386,6 +573,53 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="(Deprecated; ignored) Formerly controlled progress reward annealing.",
+    )
+    parser.add_argument(
+        "--disable-reward-stages",
+        action="store_true",
+        help="Disable staged reward curriculum and keep reward term weights fixed.",
+    )
+    parser.add_argument(
+        "--reward-stage-fracs",
+        type=str,
+        default="0.35,0.35,0.30",
+        help="Comma-separated stage fractions that split total timesteps.",
+    )
+    parser.add_argument(
+        "--stage-progress-weights",
+        type=str,
+        default="1.0,1.0,1.0",
+        help="Per-stage weights for normalized progress reward.",
+    )
+    parser.add_argument(
+        "--stage-speed-weights",
+        type=str,
+        default="0.0,0.05,0.1",
+        help="Per-stage weights for speed bonus.",
+    )
+    parser.add_argument(
+        "--stage-steer-penalties",
+        type=str,
+        default="0.0,0.01,0.02",
+        help="Per-stage steer-rate penalties.",
+    )
+    parser.add_argument(
+        "--stage-gate-rewards",
+        type=str,
+        default="0.0,0.5,1.0",
+        help="Per-stage gate rewards.",
+    )
+    parser.add_argument(
+        "--stage-off-track-penalties",
+        type=str,
+        default="-1.0,-1.0,-1.0",
+        help="Per-stage off-track penalties.",
+    )
+    parser.add_argument(
+        "--output-model",
+        type=str,
+        default=None,
+        help="Override path for the final saved model directory (skips checkpoint_dir subdirectory).",
     )
     return parser.parse_args()
 
@@ -398,7 +632,9 @@ def main() -> None:
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     num_envs = max(1, args.num_envs)
-    env = make_vector_env(args.config, num_envs, args.obs_scale, args.throttle_bias)
+    env = make_vector_env(
+        args.config, num_envs, args.obs_scale, args.throttle_bias, args.frame_stack
+    )
 
     if torch.backends.mps.is_available():
         device = "mps"
@@ -406,12 +642,13 @@ def main() -> None:
         device = "auto"
 
     base_metadata = build_metadata(args, run_name, num_envs, device)
-    checkpoint_callback = ReadableCheckpointCallback(
-        save_freq=max(1, args.checkpoint_frequency // env.num_envs),
-        save_path=checkpoint_dir,
-        name_prefix="sac_racey",
-        base_metadata=base_metadata,
-    )
+    base_metadata["reward_stage_fracs"] = args.reward_stage_fracs
+    base_metadata["stage_progress_weights"] = args.stage_progress_weights
+    base_metadata["stage_speed_weights"] = args.stage_speed_weights
+    base_metadata["stage_steer_penalties"] = args.stage_steer_penalties
+    base_metadata["stage_gate_rewards"] = args.stage_gate_rewards
+    base_metadata["stage_off_track_penalties"] = args.stage_off_track_penalties
+    base_metadata["disable_reward_stages"] = bool(args.disable_reward_stages)
     progress_callback = ProgressBarCallback(args.total_timesteps)
     diagnostics_callback = DiagnosticsCallback()
     bias_anneal_steps = max(
@@ -424,17 +661,26 @@ def main() -> None:
         ent_start_mult=args.ent_start_mult,
         ent_anneal_steps=ent_anneal_steps,
     )
-    callbacks: CallbackList = CallbackList(
-        [
-            checkpoint_callback,
-            progress_callback,
-            diagnostics_callback,
-            bias_entropy_callback,
-        ]
-    )
+    reward_stages_callback = build_reward_stages_callback(args)
+    callback_items: list[BaseCallback] = [
+        progress_callback,
+        diagnostics_callback,
+        bias_entropy_callback,
+    ]
+    if args.checkpoint_frequency > 0:
+        checkpoint_callback = ReadableCheckpointCallback(
+            save_freq=max(1, args.checkpoint_frequency // env.num_envs),
+            save_path=checkpoint_dir,
+            name_prefix="sac_racey",
+            base_metadata=base_metadata,
+        )
+        callback_items.insert(0, checkpoint_callback)
+    if reward_stages_callback is not None:
+        callback_items.append(reward_stages_callback)
+    callbacks: CallbackList = CallbackList(callback_items)
 
     model = SAC(
-        "MlpPolicy",
+        "CnnPolicy",
         env,
         verbose=1,
         learning_rate=args.learning_rate,
@@ -455,7 +701,7 @@ def main() -> None:
     model.learn(total_timesteps=args.total_timesteps, callback=callbacks)
 
     env.close()
-    final_model_path = os.path.join(checkpoint_dir, "sac_racey_final")
+    final_model_path = args.output_model if args.output_model else os.path.join(checkpoint_dir, "sac_racey_final")
     final_metadata = dict(base_metadata)
     final_metadata["checkpoint_timesteps"] = int(model.num_timesteps)
     final_metadata["final"] = True
